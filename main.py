@@ -287,6 +287,135 @@ if "auslastung_results" in st.session_state:
                 margin=dict(l=10, r=10, t=40, b=10)
             )
             st.plotly_chart(fig, use_container_width=True)
+    st.header("Auslastung im Zeitverlauf über die Runs hinweg")
+
+    if "auslastung_results" in st.session_state:
+        auslastung_results = st.session_state["auslastung_results"]
+
+        # --------- Aggregation über alle Tage pro Parameter-Set ---------
+        param_sets = sorted(set([entry["Parameter Set"] for entry in auslastung_results]))
+        hours = list(range(1, 13))
+        hour_labels = [f"{6 + h - 1}:00–{6 + h}:00" for h in hours]  # "6:00–7:00", ...
+
+        summary_data = []
+        for param_set in param_sets:
+            # Alle Einträge dieses Parameter-Sets
+            entries = [e for e in auslastung_results if e["Parameter Set"] == param_set]
+            # Matrix: Zeile=Tag, Spalte=Stunde
+            hourly_matrix = np.stack([entry["Hourly Util Means (%)"] for entry in entries])
+            means = np.mean(hourly_matrix, axis=0)
+            stds = np.std(hourly_matrix, axis=0, ddof=1)
+            n = hourly_matrix.shape[0]
+            # 95%-KI (zweiseitig, Mittelwert)
+            ci_halfwidth = t.ppf(0.975, n - 1) * stds / np.sqrt(n)
+            ci_upper = means + ci_halfwidth
+            ci_lower = means - ci_halfwidth
+
+            # Speichern für Plot & Export
+            summary_data.append(pd.DataFrame({
+                "Stunde (Label)": hour_labels,
+                "Stunde (Index)": hours,
+                "Mittelwert Auslastung (%)": means,
+                "KI Min (%)": ci_lower,
+                "KI Max (%)": ci_upper,
+                "Parameter Set": param_set
+            }))
+
+        # --------- Gesamttabelle zum Export & Ansicht ---------
+        df_export = pd.concat(summary_data, ignore_index=True)
+        with st.expander("📂 Konsolidierte Auslastungsdaten (Export)", expanded=False):
+            st.dataframe(df_export.style.format({
+                "Mittelwert Auslastung (%)": "{:.2f}",
+                "KI Min (%)": "{:.2f}",
+                "KI Max (%)": "{:.2f}"
+            }), use_container_width=True)
+
+            # Excel-Datei im Speicher erstellen
+            excel_buffer = io.BytesIO()
+            df_export.to_excel(excel_buffer, index=False, engine='openpyxl')
+            excel_buffer.seek(0)  # Wichtig: An den Anfang des Puffers setzen
+
+            st.download_button(
+                "Excel herunterladen",
+                data=excel_buffer,
+                file_name="auslastung_konsolidiert.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+        # --------- Plot (mit KI) ---------
+
+        import plotly.graph_objects as go
+
+        # Label- und Farbmapping nach gewünschter Zuordnung
+        label_map = {
+            0: "Einfache Steuerung | 10 Aufzüge",  # royalblue
+            1: "Richtungsbasierte Steuerung | 10 Aufzüge"  # crimson
+        }
+        farben = {
+            0: "royalblue",  # Einfache Steuerung
+            1: "crimson"  # Richtungsbasierte Steuerung
+        }
+        fillcolors = {
+            0: "rgba(65,105,225,0.13)",  # Einfache Steuerung, royalblue soft
+            1: "rgba(220,20,60,0.13)"  # Richtungsbasierte, crimson soft
+        }
+
+        fig = go.Figure()
+        for df in summary_data:
+            # Sichere Extraktion des Parametersets (0 oder 1)
+            pset_value = df["Parameter Set"].iloc[0]
+            try:
+                pset = int(str(pset_value).replace("Parameter Set", "").strip())
+            except Exception:
+                pset = pset_value  # fallback
+
+            kurven_label = label_map.get(pset, f"Parameter Set {pset}")
+            ki_label = f"KI: {kurven_label}"
+
+            # Mittelwert-Kurve
+            fig.add_trace(go.Scatter(
+                x=df["Stunde (Label)"],
+                y=df["Mittelwert Auslastung (%)"],
+                mode="lines+markers",
+                name=kurven_label,
+                line=dict(width=2, color=farben.get(pset, "gray")),
+                marker=dict(color=farben.get(pset, "gray")),
+                showlegend=True
+            ))
+
+            # KI-Band
+            fig.add_trace(go.Scatter(
+                x=pd.concat([df["Stunde (Label)"], df["Stunde (Label)"][::-1]]),
+                y=pd.concat([df["KI Max (%)"], df["KI Min (%)"][::-1]]),
+                fill="toself",
+                fillcolor=fillcolors.get(pset, "rgba(128,128,128,0.12)"),
+                line=dict(color="rgba(0,0,0,0)"),
+                name=ki_label,
+                showlegend=True,
+                hoverinfo="skip"
+            ))
+
+        fig.update_layout(
+            title="Verlauf der Ressourcenauslastung über alle Replikationen",
+            xaxis_title="Tageszeit",
+            yaxis=dict(
+                title="Ø Auslastung [%]",
+                rangemode="tozero",
+                range=[
+                    30,
+                    max(df_export["KI Max (%)"]) + 5  # +5% Puffer nach oben, auf Basis aller KI-Maxima!
+                ]
+            ),
+            template="plotly_white",
+            legend=dict(
+                orientation="v",
+                x=1, xanchor="left",
+                y=0.5, yanchor="middle"
+            ),
+            height=410,
+            margin=dict(l=20, r=20, t=60, b=20),
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
     # ========== 8. Stundenauswertung der Transportzeiten je Parameter Set ==========
     if "auslastung_results" in st.session_state:
