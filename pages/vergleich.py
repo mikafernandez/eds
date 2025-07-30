@@ -303,7 +303,7 @@ if data_loaded:
     fig_ci_transport = plot_ci_points_multicolor(
         names, means, ci_mins, ci_maxs, farben,
         x_title="Mittlere Transportzeit [s]",
-        main_title="Konfidenzintervalle Mittlere Transportzeit pro Person mit Signifikanzniveau von 5%"
+        main_title="Konfidenzintervalle mittlere Transportzeit pro Person mit Signifikanzniveau von 5%"
     )
     st.plotly_chart(fig_ci_transport, use_container_width=True)
 
@@ -320,7 +320,7 @@ if data_loaded:
     fig_ci_wait = plot_ci_points_multicolor(
         names, means, ci_mins, ci_maxs, farben,
         x_title="Mittlere Wartezeit [s]",
-        main_title="Konfidenzintervalle Mittlere Wartezeit pro Person mit Signifikanzniveau von 5%"
+        main_title="Konfidenzintervalle mittlere Wartezeit pro Person mit Signifikanzniveau von 5%"
     )
     st.plotly_chart(fig_ci_wait, use_container_width=True)
 
@@ -337,7 +337,7 @@ if data_loaded:
     fig_ci_util = plot_ci_points_multicolor(
         names, means, ci_mins, ci_maxs, farben,
         x_title="Ressourcenauslastung [%]",
-        main_title="Konfidenzintervalle Mittlere Aufzugsauslastung mit Signifikanzniveau von 5%"
+        main_title="Konfidenzintervalle mittlere Aufzugsauslastung mit Signifikanzniveau von 5%"
     )
     st.plotly_chart(fig_ci_util, use_container_width=True)
 
@@ -354,7 +354,7 @@ if data_loaded:
     fig_ci_maxwait = plot_ci_points_multicolor(
         names, means, ci_mins, ci_maxs, farben,
         x_title="Maximale Wartezeit [s]",
-        main_title="Konfidenzintervalle Maximale Wartezeit mit Signifikanzniveau von 5%"
+        main_title="Konfidenzintervalle maximale Wartezeit mit Signifikanzniveau von 5%"
     )
     # Orientierungslinie bei z.B. 180 Sekunden
     fig_ci_maxwait.add_vline(

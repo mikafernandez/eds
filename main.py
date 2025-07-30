@@ -95,8 +95,7 @@ st.title("AnyLogic – Aufzugssteuerung: Datenauswertung")
 
 st.markdown("""
 ## 📥 Upload  
-Bitte lade die Excel-Datei hoch, die aus deinem Simulationslauf mit  
-**9 Aufzügen** und **16 Etagen** erzeugt wurde
+Bitte lade die Excel-Datei hoch, die aus deinem Simulationslauf erzeugt wurde
 """)
 
 # Parameter-Eingabe für Auswertung
@@ -174,39 +173,63 @@ if "results" in st.session_state:
             "CI upper (95%)": "{:.2f}"
         }), use_container_width=True)
 
-    # Aggregierter Plot für beide Parameter Sets
+    # Mapping: Stunde → Tageszeit
+    stunden_labels = [f"{6 + h}:00–{7 + h}:00" for h in range(12)]  # ['6:00–7:00', ..., '17:00–18:00']
+
+    label_map = {
+        "Parameter Set 1": "Einfache Steuerung | 10 Aufzüge",
+        "Parameter Set 0": "Richtungsbasierte Steuerung | 10 Aufzüge"
+    }
+    farben = {
+        "Parameter Set 1": "royalblue",
+        "Parameter Set 0": "crimson"
+    }
+    fillfarben = {
+        "Parameter Set 1": "rgba(65, 105, 225, 0.18)",
+        "Parameter Set 0": "rgba(220, 20, 60, 0.18)"
+    }
+
     fig = go.Figure()
     for param_set, table in summary_tables.items():
+        kurven_label = label_map[param_set]
+        farbe = farben[param_set]
+        fillcolor = fillfarben[param_set]
+
+        # Stundenlabels auf x-Achse anwenden
+        x_labels = stunden_labels[:len(table)]
+
         fig.add_trace(go.Scatter(
-            x=table["Stunde"],
+            x=x_labels,
             y=table["Mittelwert"],
             mode="lines+markers",
-            name=f"Mittelwert: {param_set}",
-            line=dict(color=farben[param_set], width=3)
+            name=f"Mittelwert: {kurven_label}",
+            line=dict(color=farbe, width=3)
         ))
         fig.add_trace(go.Scatter(
-            x=table["Stunde"],
+            x=x_labels,
             y=table["CI upper (95%)"],
             mode="lines",
-            line=dict(width=0, color=farben[param_set]),
+            line=dict(width=0, color=farbe),
             showlegend=False,
             hoverinfo="skip"
         ))
         fig.add_trace(go.Scatter(
-            x=table["Stunde"],
+            x=x_labels,
             y=table["CI lower (95%)"],
             mode="lines",
             fill="tonexty",
-            fillcolor=fillfarben[param_set],
-            line=dict(width=0, color=farben[param_set]),
-            name=f"95% CI: {param_set}",
+            fillcolor=fillcolor,
+            line=dict(width=0, color=farbe),
+            name=f"95% CI: {kurven_label}",
             showlegend=True,
             hoverinfo="skip"
         ))
+
+
     fig.update_layout(
-        title="Stunden-Mittelwerte & 95%-Konfidenzintervall je Parameter Set",
-        xaxis_title="Stunde",
-        yaxis_title="Ø Wartezeit (Sekunden)",
+        title="Mittlere Wartezeit im Tagesverlauf",
+        xaxis_title="Tageszeit",
+        yaxis_title="Ø Wartezeit [s]",
         template="plotly_white",
         height=390,
         margin=dict(l=10, r=10, t=50, b=10),
@@ -220,6 +243,50 @@ if "results" in st.session_state:
         xaxis=dict(dtick=1)
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    import numpy as np
+    from scipy.stats import t
+
+    # --- Unterschied der Tagesmittelwerte (Systemvergleich) ---
+
+    # 1. Sammle Tagesmittelwerte für beide Systeme (gleiche Reihenfolge, z. B. Tag 1 bis n)
+    tage = []
+    means_set0, means_set1 = [], []
+    for entry in results:
+        if entry["Parameter Set"] == "Parameter Set 0":
+            tage.append(entry["Day"])
+            means_set0.append(entry["Daily Mean"])
+    for entry in results:
+        if entry["Parameter Set"] == "Parameter Set 1":
+            means_set1.append(entry["Daily Mean"])
+
+    means_set0 = np.array(means_set0)
+    means_set1 = np.array(means_set1)
+    diff = means_set1 - means_set0  # Differenz je Tag
+
+    # 2. Mittelwert und KI der Differenzen
+    n = len(diff)
+    mean_diff = np.mean(diff)
+    std_diff = np.std(diff, ddof=1)
+    alpha = 0.05
+    tval = t.ppf(1 - alpha / 2, n - 1) if n > 1 else 0
+    se = std_diff / np.sqrt(n) if n > 1 else 0
+    ci_lower = mean_diff - tval * se
+    ci_upper = mean_diff + tval * se
+
+    st.header("Konfidenzintervall der Differenz (System 1 - System 0)")
+    st.markdown(
+        f"""
+        <b>Unterschied der Tagesmittelwerte:</b><br>
+        - Mittelwert der Differenz: <b>{mean_diff:.2f}</b> Sekunden<br>
+        - 95%-Konfidenzintervall: <b>[{ci_lower:.2f}, {ci_upper:.2f}]</b><br>
+        """,
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        "- **Interpretation:** Ist das Intervall vollständig unter Null, war System 1 **signifikant besser** als System 0 (z. B. kürzere Wartezeiten). "
+        "Liegt es über Null, ist System 0 besser."
+    )
 
     # ========== 6. Tagesmittelwerte: Konfidenzintervall ==========
     st.header("Konfidenzintervall des Tagesmittelwerts (je Parameter Set)")
@@ -602,6 +669,133 @@ if "auslastung_results" in st.session_state:
                     }),
                     use_container_width=True
                 )
+
+            import streamlit as st
+            import pandas as pd
+            import numpy as np
+            import plotly.graph_objects as go
+            from io import BytesIO
+
+
+            # Hilfsfunktion zur Aggregation & CI-Berechnung
+            def summarize_hourly_persons_max(auslastung_results):
+                """
+                Aggregiert 'Hourly Persons Max' über alle Tage für beide Parameter Sets.
+                Gibt für jede Stunde: Mittelwert, Varianz, Konfidenzintervall.
+                """
+                stats = {}
+                stunden_labels = [f"{6 + h}:00 - {7 + h}:00" for h in range(12)]
+                for param_set in ["Parameter Set 1", "Parameter Set 0"]:
+                    # Alle Tagesverläufe für dieses Parameterset als DataFrame
+                    values = [entry["Hourly Persons Max"] for entry in auslastung_results if
+                              entry["Parameter Set"] == param_set]
+                    df = pd.DataFrame(values).T  # shape: [12 Stunden, n_days]
+                    # Statistiken je Stunde (über Tage)
+                    means = df.mean(axis=1)
+                    vars_ = df.var(axis=1, ddof=1)
+                    stds = df.std(axis=1, ddof=1)
+                    n = df.shape[1]
+                    # t-Wert für 95%-KI (Student's t, df=n-1)
+                    from scipy.stats import t
+                    t_value = t.ppf(0.975, df=n - 1) if n > 1 else 0
+                    ci_upper = means + t_value * stds / np.sqrt(n)
+                    ci_lower = means - t_value * stds / np.sqrt(n)
+                    stats[param_set] = pd.DataFrame({
+                        "Stunde": stunden_labels,
+                        "Mittelwert Personen-Maximum": means.values,
+                        "Varianz Personen-Maximum": vars_.values,
+                        "CI lower Personen-Maximum (95%)": ci_lower.values,
+                        "CI upper Personen-Maximum (95%)": ci_upper.values,
+                    })
+                return stats
+
+
+            # UI Start
+            if "auslastung_results" in st.session_state:
+                auslastung_results = st.session_state["auslastung_results"]
+
+                # Farbzuordnung und Namen
+                farben = {
+                    "Parameter Set 1": "royalblue",
+                    "Parameter Set 0": "crimson"
+                }
+                fillfarben = {
+                    "Parameter Set 1": "rgba(65, 105, 225, 0.12)",
+                    "Parameter Set 0": "rgba(220, 20, 60, 0.12)"
+                }
+                anzeige_namen = {
+                    "Parameter Set 1": "Einfache Steuerung | 10 Aufzüge",
+                    "Parameter Set 0": "Richtungsbasierte Steuerung | 10 Aufzüge"
+                }
+
+                # Zusammenfassung der hourly Personen-Max Daten
+                persons_max_summary_tables = summarize_hourly_persons_max(auslastung_results)
+
+                with st.expander("🔽 Stündliche Maximalbelegung (Personen) – Vergleich & Download", expanded=True):
+                    st.header("Stundenauswertung Maximalbelegung im Aufzug (aggregiert über alle Tage)")
+                    # Tabellenansicht für beide Parameter Sets
+                    for param_set, table in persons_max_summary_tables.items():
+                        st.subheader(f"👥 {anzeige_namen[param_set]} – Aggregiert über {len(table)} Stunden")
+                        st.dataframe(
+                            table.style.format({
+                                "Mittelwert Personen-Maximum": "{:.2f}",
+                                "Varianz Personen-Maximum": "{:.2f}",
+                                "CI lower Personen-Maximum (95%)": "{:.2f}",
+                                "CI upper Personen-Maximum (95%)": "{:.2f}",
+                            }),
+                            use_container_width=True
+                        )
+
+                    # --- Diagramm ---
+                    fig = go.Figure()
+                    for param_set, table in persons_max_summary_tables.items():
+                        # Linienplot für Mittelwert
+                        fig.add_trace(go.Scatter(
+                            x=table["Stunde"],
+                            y=table["Mittelwert Personen-Maximum"],
+                            mode="lines+markers",
+                            name=f"{anzeige_namen[param_set]} (Mittelwert)",
+                            line=dict(width=2, color=farben[param_set]),
+                            marker=dict(color=farben[param_set]),
+                        ))
+                        # Schraffiertes Konfidenzintervall
+                        fig.add_trace(go.Scatter(
+                            x=pd.concat([table["Stunde"], table["Stunde"][::-1]]),
+                            y=pd.concat([table["CI upper Personen-Maximum (95%)"],
+                                         table["CI lower Personen-Maximum (95%)"][::-1]]),
+                            fill="toself",
+                            fillcolor=fillfarben[param_set],
+                            line=dict(color="rgba(0,0,0,0)"),
+                            showlegend=True,
+                            name=f"{anzeige_namen[param_set]} (95% KI)"
+                        ))
+
+                    fig.update_layout(
+                        title="Stündlicher Verlauf des maximalen Personenaufkommens (über alle Replikationstage)",
+                        xaxis_title="Stunde",
+                        yaxis_title="Maximale Personenanzahl pro Stunde",
+                        legend=dict(font=dict(size=12)),
+                        height=480,
+                        margin=dict(l=20, r=20, t=60, b=10),
+                        template="plotly_white"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # --- Download als Excel ---
+                    excel_data = {}
+                    for param_set, table in persons_max_summary_tables.items():
+                        excel_data[anzeige_namen[param_set]] = table
+                    # Schreibe in einen einzigen Excel mit mehreren Sheets
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                        for name, df in excel_data.items():
+                            df.to_excel(writer, index=False, sheet_name=name[:31])
+                    st.download_button(
+                        label="⏬ Download aggregierte Stundenauswertung (Excel)",
+                        data=output.getvalue(),
+                        file_name="Maximalbelegung_Stundenauswertung.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
 
             # Mittelwert-Vergleich und Plot
             mean_1 = auslastung_summary_tables["Parameter Set 1"]["Mittelwert Transportzeit"].mean()

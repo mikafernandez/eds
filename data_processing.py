@@ -68,7 +68,7 @@ def process_utilization_excel_auslastung(file_path: str, elevator_anzahl: int, a
     """
     Liest alle Simulations-Sheets ein und berechnet pro Aufzug und Stunde Mittelwerte der
     Auslastung, Transportzeit und Personenanzahl. Zusätzlich werden pro Stunde die Transportzeitverteilungen
-    (für Histogramme) extrahiert.
+    (für Histogramme) extrahiert. NEU: Pro Stunde wird das Maximum der Personenanzahl über alle Aufzüge berechnet.
     """
     # Sheet-Mapping je nach Anzahl Simulationsläufe
     if anzahl_simulationslaeufe == 5:
@@ -158,20 +158,27 @@ def process_utilization_excel_auslastung(file_path: str, elevator_anzahl: int, a
                     mask_pers = (timestamps_pers >= start_sec) & (timestamps_pers < end_sec)
                     if mask_pers.any():
                         mean_pers = person_count[mask_pers].mean()
-                        elevator_hourly_pers[idx].append(mean_pers)
+                        max_pers = person_count[mask_pers].max()
+                        elevator_hourly_pers[idx].append((mean_pers, max_pers))
                     else:
-                        elevator_hourly_pers[idx].append(np.nan)
+                        elevator_hourly_pers[idx].append((np.nan, np.nan))
 
-            # Mittelwerte über alle Aufzüge (je Stunde)
-            mean_hourly_util = [np.nanmean([elevator_hourly_util[el][h] for el in range(elevator_anzahl)]) for h in
-                                range(hours)]
-            mean_hourly_trans = [np.nanmean([elevator_hourly_trans[el][h] for el in range(elevator_anzahl)]) for h in
-                                 range(hours)]
-            mean_hourly_pers = [np.nanmean([elevator_hourly_pers[el][h] for el in range(elevator_anzahl)]) for h in
-                                range(hours)]
+            # Mittelwerte & Maxima über alle Aufzüge (je Stunde)
+            mean_hourly_util = [np.nanmean([elevator_hourly_util[el][h] for el in range(elevator_anzahl)]) for h in range(hours)]
+            mean_hourly_trans = [np.nanmean([elevator_hourly_trans[el][h] for el in range(elevator_anzahl)]) for h in range(hours)]
+
+            # Personen: jetzt Tupel (mean, max), darum trennen:
+            mean_hourly_pers = [
+                np.nanmean([elevator_hourly_pers[el][h][0] for el in range(elevator_anzahl)]) for h in range(hours)
+            ]
+            max_hourly_pers = [
+                np.nanmax([elevator_hourly_pers[el][h][1] for el in range(elevator_anzahl)]) for h in range(hours)
+            ]
+
             daily_mean_util = np.nanmean(mean_hourly_util)
             daily_mean_trans = np.nanmean(mean_hourly_trans)
             daily_mean_pers = np.nanmean(mean_hourly_pers)
+            daily_max_pers = np.nanmax(max_hourly_pers)  # NEU: Tagesmaximum
 
             # Tagesmaximum Transportzeiten (über alle Stunden und Aufzüge)
             all_transport_values = [v for sublist in hourly_transport_values for v in sublist if not np.isnan(v)]
@@ -201,7 +208,9 @@ def process_utilization_excel_auslastung(file_path: str, elevator_anzahl: int, a
                 "Hourly Transport Values (s)": hourly_transport_values,
                 "Hourly Transport Histograms": hourly_histograms,
                 "Hourly Persons Means": mean_hourly_pers,
-                "Daily Persons Mean": daily_mean_pers
+                "Hourly Persons Max": max_hourly_pers,  # NEU: Stundenmaxima
+                "Daily Persons Mean": daily_mean_pers,
+                "Daily Persons Max": daily_max_pers      # NEU: Tagesmaximum
             })
 
     return processed_data
@@ -439,3 +448,146 @@ def summarize_hourly_stats(results, alpha=0.05):
         summary_tables[param_set] = table
 
     return summary_tables
+
+
+def process_utilization_excel_auslastung_v2(file_path: str, elevator_anzahl: int, anzahl_simulationslaeufe: int):
+    """
+    Liest alle Simulations-Sheets ein und berechnet pro Aufzug und Stunde Mittelwerte der
+    Auslastung, Transportzeit und Personenanzahl. Zusätzlich werden pro Stunde die Transportzeitverteilungen
+    (für Histogramme) extrahiert.
+    """
+    # Sheet-Mapping je nach Anzahl Simulationsläufe
+    if anzahl_simulationslaeufe == 5:
+        sheet_map = {
+            "Parameter Set 1": ["Sheet11", "Sheet13", "Sheet15", "Sheet17", "Sheet19"],
+            "Parameter Set 0": ["Sheet12", "Sheet14", "Sheet16", "Sheet18", "Sheet20"]
+        }
+    elif anzahl_simulationslaeufe == 10:
+        sheet_map = {
+            "Parameter Set 1": ["Sheet23", "Sheet25", "Sheet27", "Sheet29", "Sheet31",
+                                "Sheet33", "Sheet35", "Sheet37", "Sheet39", "Sheet41"],
+            "Parameter Set 0": ["Sheet24", "Sheet26", "Sheet28", "Sheet30", "Sheet32",
+                                "Sheet34", "Sheet36", "Sheet38", "Sheet40", "Sheet42"]
+        }
+    elif anzahl_simulationslaeufe == 15:
+        sheet_map = {
+            "Parameter Set 1": ["Sheet33", "Sheet35", "Sheet37", "Sheet39", "Sheet41",
+                                "Sheet43", "Sheet45", "Sheet47", "Sheet49", "Sheet51",
+                                "Sheet53", "Sheet55", "Sheet57", "Sheet59", "Sheet61"],
+            "Parameter Set 0": ["Sheet34", "Sheet36", "Sheet38", "Sheet40", "Sheet42",
+                                "Sheet44", "Sheet46", "Sheet48", "Sheet50", "Sheet52",
+                                "Sheet54", "Sheet56", "Sheet58", "Sheet60", "Sheet62"]
+        }
+    else:
+        raise ValueError("Nur 5, 10 oder 15 Simulationsläufe unterstützt!")
+
+    hours = 12  # Annahme: 12 Stunden werden je Tag betrachtet
+    hour_limits = [(h * 3600, (h + 1) * 3600) for h in range(hours)]
+    processed_data = []
+
+    # Index-Offsets pro Aufzug im Sheet
+    base_idxs = {
+        "idle": (0, 1),
+        "transport": (4, 5),
+        "person": (8, 9)
+    }
+    elevator_jump = 11  # Spaltenversatz pro Aufzug im Sheet
+
+    for param_set, sheets in sheet_map.items():
+        for day_index, sheet_name in enumerate(sheets, start=1):
+            df = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+            elevator_hourly_util = [[] for _ in range(elevator_anzahl)]
+            elevator_hourly_trans = [[] for _ in range(elevator_anzahl)]
+            elevator_hourly_pers = [[] for _ in range(elevator_anzahl)]
+            hourly_transport_values = [[] for _ in range(hours)]  # Für Histogramme
+
+            for idx in range(elevator_anzahl):
+                offset = idx * elevator_jump
+                # Idle-Events extrahieren und auf Stunde aggregieren
+                ts_idle, idle_col = offset + base_idxs["idle"][0], offset + base_idxs["idle"][1]
+                idle_data = df.iloc[2:, [ts_idle, idle_col]].dropna(how='all')
+                idle_data = idle_data.dropna(subset=[ts_idle])
+                timestamps_idle = pd.to_numeric(idle_data.iloc[:, 0], errors='coerce')
+                idle_events = pd.to_numeric(idle_data.iloc[:, 1], errors='coerce').fillna(0)
+                # Transportzeiten
+                ts_trans, trans_col = offset + base_idxs["transport"][0], offset + base_idxs["transport"][1]
+                trans_data = df.iloc[2:, [ts_trans, trans_col]].dropna(how='all')
+                trans_data = trans_data.dropna(subset=[ts_trans])
+                timestamps_trans = pd.to_numeric(trans_data.iloc[:, 0], errors='coerce')
+                transport_times = pd.to_numeric(trans_data.iloc[:, 1], errors='coerce').fillna(np.nan)
+                # Personen
+                ts_pers, pers_col = offset + base_idxs["person"][0], offset + base_idxs["person"][1]
+                pers_data = df.iloc[2:, [ts_pers, pers_col]].dropna(how='all')
+                pers_data = pers_data.dropna(subset=[ts_pers])
+                timestamps_pers = pd.to_numeric(pers_data.iloc[:, 0], errors='coerce')
+                person_count = pd.to_numeric(pers_data.iloc[:, 1], errors='coerce').fillna(np.nan)
+
+                # Stündliche Aggregation
+                for h, (start_sec, end_sec) in enumerate(hour_limits):
+                    # Idle-Zeit
+                    mask_idle = (timestamps_idle >= start_sec) & (timestamps_idle < end_sec)
+                    if mask_idle.any():
+                        idle_in_hour = idle_events[mask_idle].sum()
+                        util = max(0.0, min(1.0, 1 - idle_in_hour / 3600))
+                        elevator_hourly_util[idx].append(util * 100)
+                    else:
+                        elevator_hourly_util[idx].append(np.nan)
+                    # Transportzeit (auch Einzelwerte für Histogramm)
+                    mask_trans = (timestamps_trans >= start_sec) & (timestamps_trans < end_sec)
+                    if mask_trans.any():
+                        mean_trans = transport_times[mask_trans].mean()
+                        elevator_hourly_trans[idx].append(mean_trans)
+                        hourly_transport_values[h].extend(transport_times[mask_trans].tolist())
+                    else:
+                        elevator_hourly_trans[idx].append(np.nan)
+                    # Personenanzahl
+                    mask_pers = (timestamps_pers >= start_sec) & (timestamps_pers < end_sec)
+                    if mask_pers.any():
+                        mean_pers = person_count[mask_pers].mean()
+                        elevator_hourly_pers[idx].append(mean_pers)
+                    else:
+                        elevator_hourly_pers[idx].append(np.nan)
+
+            # Mittelwerte über alle Aufzüge (je Stunde)
+            mean_hourly_util = [np.nanmean([elevator_hourly_util[el][h] for el in range(elevator_anzahl)]) for h in
+                                range(hours)]
+            mean_hourly_trans = [np.nanmean([elevator_hourly_trans[el][h] for el in range(elevator_anzahl)]) for h in
+                                 range(hours)]
+            mean_hourly_pers = [np.nanmean([elevator_hourly_pers[el][h] for el in range(elevator_anzahl)]) for h in
+                                range(hours)]
+            daily_mean_util = np.nanmean(mean_hourly_util)
+            daily_mean_trans = np.nanmean(mean_hourly_trans)
+            daily_mean_pers = np.nanmean(mean_hourly_pers)
+
+            # Tagesmaximum Transportzeiten (über alle Stunden und Aufzüge)
+            all_transport_values = [v for sublist in hourly_transport_values for v in sublist if not np.isnan(v)]
+            daily_max_trans = np.nanmax(all_transport_values) if all_transport_values else np.nan
+
+            # Histogramme pro Stunde berechnen (für Visualisierung)
+            hourly_histograms = []
+            for values in hourly_transport_values:
+                arr = np.array(values)
+                arr = arr[~np.isnan(arr)]
+                if len(arr) > 0:
+                    bin_count = min(30, max(5, int(np.ceil(np.sqrt(len(arr))))))
+                    hist, bin_edges = np.histogram(arr, bins=bin_count)
+                    hourly_histograms.append({"counts": hist.tolist(), "bin_edges": bin_edges.tolist()})
+                else:
+                    hourly_histograms.append({"counts": [], "bin_edges": []})
+
+            # Ergebnisspeicherung je Tag und Parameterset
+            processed_data.append({
+                "Parameter Set": param_set,
+                "Day": f"Day {day_index}",
+                "Hourly Util Means (%)": mean_hourly_util,
+                "Daily Util Mean (%)": daily_mean_util,
+                "Hourly Transport Means (s)": mean_hourly_trans,
+                "Daily Transport Mean (s)": daily_mean_trans,
+                "Daily Transport Max (s)": daily_max_trans,
+                "Hourly Transport Values (s)": hourly_transport_values,
+                "Hourly Transport Histograms": hourly_histograms,
+                "Hourly Persons Means": mean_hourly_pers,
+                "Daily Persons Mean": daily_mean_pers
+            })
+
+    return processed_data
